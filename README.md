@@ -1,1 +1,1 @@
-# RocketLab---GenAI
+# RocketLab-GenAI
