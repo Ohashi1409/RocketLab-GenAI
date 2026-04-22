@@ -50,7 +50,11 @@ Crie um arquivo chamado `.env` na raiz do projeto e adicione a sua chave de API 
 GEMINI_API_KEY=sua_chave_api_aqui
 ```
 
-**5. Execute a Aplicação (Arquitetura de Microsserviços)**
+**5. Adicionando banco de dados (Opcional)**
+Caso o banco de dados utilizado pro projeto não esteja dentro do projeto em si, o usuário deve ir no drive da Visagio, ir na pasta onde morarm o pdf da atividade e o database, e pegar o database referenciado para uso na atividade para utilizaá-lo no projeto 
+Caso o banco já exista, basta prosseguir no passo a passo 
+
+**6. Execute a Aplicação (Arquitetura de Microsserviços)**
 Este projeto roda com o Backend e o Frontend operando simultaneamente. Você precisará abrir **dois terminais** no seu VS Code ou prompt de comando (certifique-se de que o `venv` está ativado em ambos):
 
 * **Terminal 1: Ligando o Backend (API)**
@@ -65,7 +69,7 @@ Este projeto roda com o Backend e o Frontend operando simultaneamente. Você pre
   ```
   *(A interface será aberta automaticamente no seu navegador padrão em http://localhost:8501)*
 
-**6. Acesse e Teste a Aplicação**
+**7. Acesse e Teste a Aplicação**
 Vá até a aba do navegador que o Streamlit abriu (`http://localhost:8501`) e faça suas perguntas em linguagem natural!
 
 **Sugestões de teste:**
