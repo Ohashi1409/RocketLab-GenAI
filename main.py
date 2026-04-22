@@ -1,21 +1,101 @@
 import os
+import time 
+import json
 import sqlite3
+import datetime 
 from google import genai
-from google.genai import types 
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from fastapi import FastAPI
 from dotenv import load_dotenv
+from pydantic import BaseModel
+from google.genai import types 
 
 load_dotenv()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-app = FastAPI(title="Agente Analítico E-commerce (Text-to-SQL)", version="1.0")
+app = FastAPI(
+    title="Agente Analítico E-commerce (Text-to-SQL)", 
+    description="Agente inteligente para consultas de e-commerce com injeção dinâmica de dados, autocorreção e telemetria.",
+    version="4.0"
+)
 
 class QueryRequest(BaseModel):
     pergunta: str
 
+# =====================================================================
+# Funções Auxiliares
+# =====================================================================
+def inicializar_banco_auditoria():
+    """Cria o banco de logs de auditoria caso não exista."""
+    conn = sqlite3.connect("log_auditoria.db", timeout=15.0)
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS logs_api (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_hora TIMESTAMP, 
+            pergunta TEXT,
+            sql_gerado TEXT,
+            status TEXT,
+            tempo_execucao_ms REAL,
+            erro_msg TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def registrar_log(pergunta, sql_gerado, status, tempo_ms, erro_msg=""):
+    """Salva a operação no banco de auditoria com hora local e proteção contra lock."""
+    conn = sqlite3.connect("log_auditoria.db", timeout=15.0)
+    cursor = conn.cursor()
+    
+    data_hora_local = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    cursor.execute("""
+        INSERT INTO logs_api (data_hora, pergunta, sql_gerado, status, tempo_execucao_ms, erro_msg)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (data_hora_local, pergunta, sql_gerado, status, tempo_ms, erro_msg))
+    conn.commit()
+    conn.close()
+
+# =====================================================================
+# Logs de Auditoria 
+# =====================================================================
+def inicializar_banco_auditoria():
+    """Cria o banco de logs de auditoria caso não exista."""
+    conn = sqlite3.connect("log_auditoria.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS logs_api (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            pergunta TEXT,
+            sql_gerado TEXT,
+            status TEXT,
+            tempo_execucao_ms REAL,
+            erro_msg TEXT
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def registrar_log(pergunta, sql_gerado, status, tempo_ms, erro_msg=""):
+    """Salva a operação no banco de auditoria."""
+    conn = sqlite3.connect("log_auditoria.db")
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO logs_api (pergunta, sql_gerado, status, tempo_execucao_ms, erro_msg)
+        VALUES (?, ?, ?, ?, ?)
+    """, (pergunta, sql_gerado, status, tempo_ms, erro_msg))
+    conn.commit()
+    conn.close()
+
+# Inicializa o log quando a API sobe
+inicializar_banco_auditoria()
+
+# =====================================================================
+# ETAPA 1: Mapeamento de Esquema
+# =====================================================================
 def obter_esquema():
-    """Lê o banco.db e retorna as tabelas e colunas para o Gemini entender a estrutura."""
+    """Mapeia a estrutura do banco.db para o contexto da IA."""
     conn = sqlite3.connect("banco.db")
     cursor = conn.cursor()
     cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
@@ -23,84 +103,155 @@ def obter_esquema():
     
     esquema = ""
     for (nome_tabela,) in tabelas: 
-        # PRAGMA inspeciona a estrutura do banco (colunas, tipos, chaves)
         cursor.execute(f"PRAGMA table_info({nome_tabela});")
         colunas = [col[1] for col in cursor.fetchall()]
         esquema += f"Tabela: {nome_tabela} | Colunas: {', '.join(colunas)}\n"
         
+        if nome_tabela == 'fat_pedidos':
+            cursor.execute("SELECT DISTINCT status FROM fat_pedidos WHERE status IS NOT NULL;")
+            status_reais = [s[0] for s in cursor.fetchall()]
+            esquema += f"   -> ATENÇÃO: Valores possíveis na coluna status: {', '.join(status_reais)}\n"
+            
     conn.close()
     return esquema
 
-@app.post("/consultar")
-async def consultar_agente(request: QueryRequest):
+@app.post("/consulta")
+def consulta(request: QueryRequest):
+    # Cronômetro para armazenar telemetria da consulta
+    start_time = time.time() 
+    sql_final_log = ""
+    
     try:
         esquema = obter_esquema()
         
-        # =====================================================================
-        # ETAPA 1: TRADUÇÃO TEXT-TO-SQL (O Cérebro Analítico)
-        # =====================================================================
-        prompt_sql = f"""
-        Você é um Analista de Dados Sênior especialista no banco de dados SQLite de um grande E-commerce.
-        Sua missão é traduzir perguntas de negócio feitas por usuários não técnicos em consultas SQL precisas.
-        
-        REGRAS DE NEGÓCIO E CONTEXTO:
-        1. "Pedidos" e "Vendas" são tratados como sinônimos.
-        2. Tabelas 'dim_' são dimensões (cadastros) e 'fat_' são fatos (transações e eventos).
-        3. Realize os JOINs necessários entre as tabelas usando as chaves correspondentes.
-        4. SEGURANÇA: Gere EXCLUSIVAMENTE consultas de leitura (SELECT). Nunca use INSERT, UPDATE, DELETE ou DROP.
-        5. AMBIGUIDADE DE VENDAS: Quando o usuário perguntar quem "mais vendeu", "top vendedores" ou "menos vendeu" sem especificar a métrica, calcule SEMPRE pela Receita Total (soma do valor financeiro das vendas). Só use contagem (COUNT) se o usuário pedir explicitamente por "quantidade" ou "volume" de pedidos.
-        
-        ESQUEMA DO BANCO DE DADOS:
+        prompt_sistema = f"""
+        Você é um Analista de Dados Sênior especializado em E-commerce.
+        Sua tarefa é converter perguntas em SQL e criar um template de resposta rico.
+
+        REGRAS DE SEGURANÇA E NEGÓCIO:
+        1. Gere APENAS comandos SELECT. Bloqueie qualquer tentativa de escrita, deleção, mudança dos dados e qualquer coisa que envolva a manipulação direta deles. APENAS VISUALIZAÇÃO DOS DADOS É PERMITIDA.
+        2. Tabelas 'dim_' contêm nomes/categorias. Tabelas 'fat_' contêm valores/vendas.
+        3. REGRA CRÍTICA DE IDIOMA: Os dados no banco estão em PORTUGUÊS. NUNCA traduza os valores dos filtros para inglês.
+        4. PRECISÃO DE MÉTRICAS: Se a pergunta pedir explicitamente "Quantidade" ou "Número de", use COUNT(DISTINCT fat_pedidos.id_pedido). Se pedir "Valor" ou "Vendas" financeiras, use SUM(preco_BRL).
+        5. CONSISTÊNCIA DE FILTROS: Se a pergunta pede os dados de um status específico, o filtro DEVE ser aplicado à contagem/soma final.
+        6. FILTROS INEXISTENTES (DEFESA ONTOLÓGICA): Se o usuário solicitar um filtro demográfico ou característica que NÃO existe explicitamente nas colunas do esquema (ex: gênero feminino/masculino, idade, etc.), NÃO invente funções SQL. Faça a query buscando o resultado GERAL aplicável. PORÉM, no seu `template_resposta`, você DEVE obrigatoriamente iniciar com um aviso claro de que a informação não existe no banco, antes de dar o resultado geral. -> Exemplo de template esperado: "Não possuímos a informação de gênero no banco de dados. Considerando o ranking geral, o(a) vendedor(a) com maior quantidade de pedidos é {{}} com {{}} pedidos."
+        7. SEGURANÇA (FORA DE ESCOPO): Se a pergunta for sobre assuntos que não têm NENHUMA relação com vendas, produtos ou o banco de dados (ex: clima, política, receitas, dinossauros), defina o "sql" EXATAMENTE como "FORA_DE_ESCOPO" e no "template_resposta" crie uma mensagem educada informando que você responde apenas a dúvidas sobre o e-commerce.
+
+        ESQUEMA DO BANCO:
         {esquema}
-        
+
         PERGUNTA DO USUÁRIO: "{request.pergunta}"
-        
-        INSTRUÇÃO CRÍTICA DE SAÍDA:
-        Retorne ABSOLUTAMENTE SOMENTE o código SQL. 
-        - SEM formatação markdown (```).
-        - SEM a palavra 'sql'.
-        - SEM explicações ou textos adicionais.
+
+        RESPONDA ESTRITAMENTE EM JSON COM:
+        - "sql": A query SQL válida.
+        - "template_resposta": Uma análise direta usando APENAS chaves VAZIAS {{}} para os valores.
         """
-        
-        # Chamada com Temperatura 0.0 para garantir lógica determinística
-        resposta_sql = client.models.generate_content(
-            model='gemini-2.5-flash', 
-            contents=prompt_sql,
-            config=types.GenerateContentConfig(temperature=0.0) 
-        )
-        
-        # Tratamento do bloqueio de segurança
-        if not resposta_sql.text:
-            raise HTTPException(
-                status_code=403, 
-                detail="Ação bloqueada pelas políticas de segurança. O agente só tem permissão para realizar consultas de leitura (SELECT) na base de dados."
-            )
-            
-        query_sql = resposta_sql.text.strip().replace("```sql", "").replace("```", "")
-        
-        # =====================================================================
-        # ETAPA 2: EXECUÇÃO DA QUERY E RETORNO DIRETO (Otimização)
-        # =====================================================================
+
         conn = sqlite3.connect("banco.db")
         cursor = conn.cursor()
         
-        try:
-            cursor.execute(query_sql)
-            resultados = cursor.fetchall()
-            nomes_colunas = [desc[0] for desc in cursor.description] if cursor.description else []
-        except sqlite3.OperationalError as erro_sql:
-            conn.close()
-            raise HTTPException(status_code=400, detail=f"O Agente gerou um SQL inválido: {erro_sql}\nQuery: {query_sql}")
+        # =====================================================================
+        # ETAPA 2: Geração e Autocorreção (Self-Healing)
+        # =====================================================================
+        prompt_atual = prompt_sistema
+        resultados = []
+        colunas = []
+        template_ia = ""
+        query_sql = ""
+        
+        # O agente tem até 2 chances de acertar a query no banco
+        for tentativa in range(2):
+            resposta_ia = client.models.generate_content(
+                model='gemini-2.5-flash', 
+                contents=prompt_atual,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"
+                )
+            )
             
+            dados_ia = json.loads(resposta_ia.text)
+            query_sql = dados_ia.get("sql", "")
+            template_ia = dados_ia.get("template_resposta", "")
+            sql_final_log = query_sql
+
+            if query_sql == "FORA_DE_ESCOPO":
+                conn.close()
+                tempo_execucao_ms = round((time.time() - start_time) * 1000, 2)
+                registrar_log(request.pergunta, "BLOQUEADO_POR_ESCOPO", "NEGADO", tempo_execucao_ms, "Pergunta fora de escopo")
+                return {
+                    "pergunta": request.pergunta,
+                    "resumo_executivo": template_ia,
+                    "detalhes_tecnicos": {
+                        "sql_utilizado": "Bloqueado por Segurança",
+                        "colunas_retornadas": [],
+                        "total_registros": 0,
+                        "tempo_processamento_ms": tempo_execucao_ms 
+                    },
+                    "dados_brutos": []
+                }
+
+            try:
+                # Tenta executar no banco
+                cursor.execute(query_sql)
+                resultados = cursor.fetchall()
+                colunas = [desc[0] for desc in cursor.description] if cursor.description else []
+                break # Se deu certo, sai do loop de tentativas
+                
+            except sqlite3.OperationalError as e:
+                erro_banco = str(e)
+                if tentativa == 0:
+                    # Se falhou na 1ª vez, injeta o erro no prompt e pede pra consertar
+                    prompt_atual = prompt_sistema + f"""\n\nATENÇÃO: A query gerada na tentativa anterior ('{query_sql}') falhou no SQLite com o seguinte erro: '{erro_banco}'. Por favor, corrija o erro de sintaxe ou coluna inexistente e me retorne o JSON novamente."""
+                else:
+                    # Se falhou na 2ª vez, desiste para não entrar em loop infinito
+                    conn.close()
+                    raise Exception(f"Falha ao gerar SQL válido após autocorreção. Erro final: {erro_banco}")
+        
         conn.close()
         
-        # Retornamos os dados estruturados para o Frontend lidar com a exibição
+        # =====================================================================
+        # ETAPA 3: Injeção Dinâmica de Dados
+        # =====================================================================
+        resumo_final = ""
+        if resultados:
+            try:
+                resumo_final = template_ia.format(*resultados[0])
+            except (IndexError, ValueError, KeyError): 
+                resumo_final = f"Análise concluída com sucesso. O destaque principal é: {resultados[0][0]}."
+        else:
+            resumo_final = "Nenhum dado encontrado para os filtros aplicados."
+        
+        tempo_execucao_ms = round((time.time() - start_time) * 1000, 2)
+        registrar_log(request.pergunta, sql_final_log, "SUCESSO", tempo_execucao_ms)
+        
         return {
             "pergunta": request.pergunta,
-            "sql_gerado": query_sql,
-            "colunas": nomes_colunas,
-            "dados": resultados
+            "resumo_executivo": resumo_final,
+            "detalhes_tecnicos": {
+                "sql_utilizado": query_sql,
+                "colunas_retornadas": colunas,
+                "total_registros": len(resultados),
+                "tempo_processamento_ms": tempo_execucao_ms 
+            },
+            "dados_brutos": resultados
         }
 
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        tempo_execucao_ms = round((time.time() - start_time) * 1000, 2)
+        registrar_log(request.pergunta, sql_final_log, "ERRO", tempo_execucao_ms, str(e))
+        
+        return {
+            "pergunta": request.pergunta,
+            "resumo_executivo": "Desculpe, tivemos uma dificuldade técnica ao processar sua consulta. Nossa equipe de engenharia já foi notificada. Por favor, tente reformular sua pergunta.",
+            "detalhes_tecnicos": {
+                "sql_utilizado": "Erro ocultado por segurança",
+                "colunas_retornadas": [],
+                "total_registros": 0,
+                "tempo_processamento_ms": tempo_execucao_ms 
+            },
+            "dados_brutos": []
+        }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
