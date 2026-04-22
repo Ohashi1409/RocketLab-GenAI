@@ -40,11 +40,23 @@ if st.button("Gerar Análise 🚀"):
                     
                     st.divider()
                     
-                    # 2. Mostra os Dados Brutos em formato de Tabela
-                    st.markdown("### 📋 Tabela de Dados")
+                    # 2. Mostra os Dados Brutos em formato de Tabela e Gráfico
+                    st.markdown("### 📋 Visualização de Dados")
                     if dados["dados_brutos"]:
                         df = pd.DataFrame(dados["dados_brutos"], columns=dados["detalhes_tecnicos"]["colunas_retornadas"])
-                        st.dataframe(df, use_container_width=True)
+                        
+                        # Cria abas para o usuário escolher entre Tabela e Gráfico
+                        aba_tabela, aba_grafico = st.tabs(["🧮 Tabela", "📊 Gráfico"])
+                        
+                        with aba_tabela:
+                            st.dataframe(df, use_container_width=True)
+                            
+                        with aba_grafico:
+                            # Se a tabela tiver pelo menos 2 colunas e a segunda for numérica, desenha um gráfico!
+                            if len(df.columns) >= 2 and pd.api.types.is_numeric_dtype(df.iloc[:, 1]):
+                                st.bar_chart(df.set_index(df.columns[0]))
+                            else:
+                                st.info("Os dados retornados não são adequados para um gráfico de barras (necessário 1 coluna de texto e 1 de números).")
                     else:
                         st.info("Nenhum dado tabular para exibir.")
                     

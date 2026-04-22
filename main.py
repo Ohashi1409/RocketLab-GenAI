@@ -136,6 +136,10 @@ def consulta(request: QueryRequest):
         5. CONSISTÊNCIA DE FILTROS: Se a pergunta pede os dados de um status específico, o filtro DEVE ser aplicado à contagem/soma final.
         6. FILTROS INEXISTENTES (DEFESA ONTOLÓGICA): Se o usuário solicitar um filtro demográfico ou característica que NÃO existe explicitamente nas colunas do esquema (ex: gênero feminino/masculino, idade, etc.), NÃO invente funções SQL. Faça a query buscando o resultado GERAL aplicável. PORÉM, no seu `template_resposta`, você DEVE obrigatoriamente iniciar com um aviso claro de que a informação não existe no banco, antes de dar o resultado geral. -> Exemplo de template esperado: "Não possuímos a informação de gênero no banco de dados. Considerando o ranking geral, o(a) vendedor(a) com maior quantidade de pedidos é {{}} com {{}} pedidos."
         7. SEGURANÇA (FORA DE ESCOPO): Se a pergunta for sobre assuntos que não têm NENHUMA relação com vendas, produtos ou o banco de dados (ex: clima, política, receitas, dinossauros), defina o "sql" EXATAMENTE como "FORA_DE_ESCOPO" e no "template_resposta" crie uma mensagem educada informando que você responde apenas a dúvidas sobre o e-commerce.
+        8. DICIONÁRIO DE MÉTRICAS (MUITO IMPORTANTE): 
+           - "Ticket Médio": Use SUM(preco_BRL) / COUNT(DISTINCT id_pedido).
+           - "% no prazo": Calcule a proporção onde a coluna 'entrega_no_prazo' = 'Sim'.
+           - "Avaliação Negativa": Considere as notas 1 ou 2 na tabela fat_avaliacoes_pedidos.
 
         ESQUEMA DO BANCO:
         {esquema}
